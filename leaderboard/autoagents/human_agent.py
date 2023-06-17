@@ -39,7 +39,8 @@ class HumanInterface(object):
     Class to control a vehicle manually for debugging purposes
     """
 
-    def __init__(self, width, height, side_scale, left_mirror=False, right_mirror=False):
+    def __init__(self, ctrl, width, height, side_scale, left_mirror=False, right_mirror=False):
+        self._control = ctrl
         self._width = width
         self._height = height
         self._scale = side_scale
@@ -53,6 +54,12 @@ class HumanInterface(object):
         self._clock = pygame.time.Clock()
         self._display = pygame.display.set_mode((self._width, self._height), pygame.HWSURFACE | pygame.DOUBLEBUF)
         pygame.display.set_caption("Human Agent")
+
+        self._font = pygame.freetype.SysFont(None, 28)
+        self._font.origin=True
+
+        self._fontsm = pygame.freetype.SysFont(None, 22)
+        self._fontsm.origin=True
 
     def run_interface(self, input_data):
         """
@@ -78,6 +85,8 @@ class HumanInterface(object):
         # Display image
         if self._surface is not None:
             self._display.blit(self._surface, (0, 0))
+        
+        self._set_ctrl_interface(input_data['speed'][1]['speed'])
         pygame.display.flip()
 
     def set_black_screen(self):
@@ -87,6 +96,44 @@ class HumanInterface(object):
         if self._surface is not None:
             self._display.blit(self._surface, (0, 0))
         pygame.display.flip()
+
+    def _set_ctrl_interface(self, speed):
+        for e in pygame.event.get():
+            if e.type == pygame.QUIT: return
+        ticks=pygame.time.get_ticks()
+        millis=ticks%1000
+        seconds=int(ticks/1000 % 60)
+        minutes=int(ticks/60000 % 24)
+        out='{minutes:02d}:{seconds:02d}:{millis}'.format(minutes=minutes, millis=millis, seconds=seconds)
+
+        self._font.render_to(self._display, (100, 100), out, pygame.Color('white'))
+
+        # Display speed information; convert m/s to km/h by multiply with 3.6
+        out_spd='%.0f km/h' % (3.6 * np.abs(speed))
+        self._fontsm.render_to(self._display, (100, 140), 'Speed: ', pygame.Color('white'))
+        self._fontsm.render_to(self._display, (240, 140), out_spd, pygame.Color('white'))
+
+        # Display gear information; 1 is normal and -1 is reverse
+        out_gear='%s' % {-1: 'R', 0: 'N', 1: 'N'}.get(self._control.gear, self._control.gear)
+        self._fontsm.render_to(self._display, (100, 170), 'Gear: ', pygame.Color('white'))
+        self._fontsm.render_to(self._display, (240, 170), out_gear, pygame.Color('white'))
+
+        # Display steering information
+        steer=self._control.steer
+        self._fontsm.render_to(self._display, (100, 200), 'Steering: ', pygame.Color('white'))
+
+        rect_width = 80
+        rect_height = 12
+        fill_width = int(rect_width / 2 * np.abs(steer) / 0.7)
+
+        pygame.draw.rect(self._display, pygame.Color('white'), (240, 190, rect_width, rect_height), 1)
+        if (steer == 0):
+            pygame.draw.rect(self._display, pygame.Color('white'), (240 + (rect_width // 2) - 1, 190, 2, rect_height))
+        elif (steer > 0):
+            pygame.draw.rect(self._display, pygame.Color('white'), (240 + rect_width // 2, 190, fill_width, rect_height))
+        else:
+            pygame.draw.rect(self._display, pygame.Color('white'), (240 + rect_width // 2 - fill_width, 190, fill_width, rect_height))
+
 
     def _quit(self):
         pygame.quit()
@@ -105,6 +152,7 @@ class HumanAgent(AutonomousAgent):
         """
         Setup the agent parameters
         """
+        self._control = carla.VehicleControl()
         self.track = Track.SENSORS
 
         self.agent_engaged = False
@@ -115,13 +163,14 @@ class HumanAgent(AutonomousAgent):
         self._right_mirror = False
 
         self._hic = HumanInterface(
+            self._control,
             self.camera_width,
             self.camera_height,
             self._side_scale,
             self._left_mirror,
             self._right_mirror
         )
-        self._controller = KeyboardControl(path_to_conf_file)
+        self._controller = KeyboardControl(self._control, path_to_conf_file)
         self._prev_timestamp = 0
 
     def sensors(self):
@@ -143,8 +192,9 @@ class HumanAgent(AutonomousAgent):
         """
 
         sensors = [
-            {'type': 'sensor.camera.rgb', 'x': 0.7, 'y': 0.0, 'z': 1.60, 'roll': 0.0, 'pitch': 0.0, 'yaw': 0.0,
-             'width': self.camera_width, 'height': self.camera_height, 'fov': 100, 'id': 'Center'},
+            {'type': 'sensor.camera.rgb', 'x': 0.9, 'y': 0.0, 'z': 1.60, 'roll': 0.0, 'pitch': 0.0, 'yaw': 0.0,
+             'width': self.camera_width, 'height': self.camera_height, 'fov': 120, 'id': 'Center'},
+            {'type': 'sensor.speedometer','reading_frequency': 25, 'id': 'speed'}
         ]
 
         if self._left_mirror:
@@ -187,10 +237,11 @@ class KeyboardControl(object):
     Keyboard control for the human agent
     """
 
-    def __init__(self, path_to_conf_file):
+    def __init__(self, ctrl, path_to_conf_file):
         """
         Init
         """
+        self._control = ctrl
         self._control = carla.VehicleControl()
         self._steer_cache = 0.0
         self._clock = pygame.time.Clock()
@@ -255,26 +306,38 @@ class KeyboardControl(object):
         Calculate new vehicle controls based on input keys
         """
 
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                return 
-            elif event.type == pygame.KEYUP:
-                if event.key == K_q:
-                    self._control.gear = 1 if self._control.reverse else -1
-                    self._control.reverse = self._control.gear < 0
+        if keys[K_q]:
+            self._control.gear = 1 if self._control.reverse else -1
+            self._control.reverse = self._control.gear < 0
 
         if keys[K_UP] or keys[K_w]:
-            self._control.throttle = 0.8
+            self._control.throttle = 0.7
         else:
             self._control.throttle = 0.0
-
+        
         steer_increment = 3e-4 * milliseconds
         if keys[K_LEFT] or keys[K_a]:
-            self._steer_cache -= steer_increment
+            if self._steer_cache > 0:
+                self._steer_cache = 0
+            else:
+                if self._steer_cache == 0:
+                    self._steer_cache = -0.05
+                else:
+                    self._steer_cache -= steer_increment
         elif keys[K_RIGHT] or keys[K_d]:
-            self._steer_cache += steer_increment
+            if self._steer_cache < 0:
+                self._steer_cache = 0
+            else:
+                if self._steer_cache == 0:
+                    self._steer_cache = 0.05
+                else:
+                    self._steer_cache += steer_increment
         else:
-            self._steer_cache = 0.0
+            if self._steer_cache > 0:
+                self._steer_cache = max(0, self._steer_cache - steer_increment * 1.4)
+            else:
+                self._steer_cache = min(0, self._steer_cache + steer_increment * 1.4)
+        self._steer_cache = min(0.7, max(-0.7, self._steer_cache))
 
         self._control.steer = round(self._steer_cache, 1)
         self._control.brake = 1.0 if keys[K_DOWN] or keys[K_s] else 0.0

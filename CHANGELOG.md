@@ -1,5 +1,10 @@
 ## Latest changes
 
+* Displayed important information including current speed and time.
+* Improved vehicle control by adjusting throttle to `0.6` and fixing steering increment and decrement rate.
+
+## Previous changes
+
 * Routes will now also take into account the criteria of their specific scenarios, only being active when they are running. The ResultWriter now automaically adds these criteria, grouping them if more than one scenario of the same type is triggered.
 * Routes now automatically import all scenarios.
 * Routes can now have dynamic weather. These are set by keypoints at a routes percentage, and all values between them are interpolated.
