@@ -47,6 +47,8 @@ from leaderboard.utils.route_manipulation import interpolate_trajectory
 
 import leaderboard.utils.parked_vehicles as parked_vehicles
 
+import numpy as np
+from threading import Timer
 
 class RouteScenario(BasicScenario):
 
@@ -57,7 +59,7 @@ class RouteScenario(BasicScenario):
 
     category = "RouteScenario"
 
-    def __init__(self, world, config, debug_mode=0, criteria_enable=True):
+    def __init__(self, world, config, debug_mode=0, objects_path='./objects_detected.txt', criteria_enable=True):
         """
         Setup all relevant parameters and create scenarios along route
         """
@@ -66,21 +68,24 @@ class RouteScenario(BasicScenario):
         self.list_scenarios = []
         sampled_scenario_definitions = self._filter_scenarios(config.scenario_configs)
 
-        ego_vehicle = self._spawn_ego_vehicle(world)
-        if ego_vehicle is None:
+        self.time = 0
+        self.objects_path = objects_path
+
+        self.ego_vehicle = self._spawn_ego_vehicle(world)
+        if self.ego_vehicle is None:
             raise ValueError("Shutting down, couldn't spawn the ego vehicle")
 
         if debug_mode>0:
             self._draw_waypoints(world, self.route, vertical_shift=0.1, size=0.05, persistency=10000)
 
         self._build_scenarios(
-            world, ego_vehicle, sampled_scenario_definitions, timeout=10000, debug=debug_mode > 0
+            world, self.ego_vehicle, sampled_scenario_definitions, timeout=10000, debug=debug_mode > 0
         )
 
         self._spawn_parked_vehicles()
 
         super(RouteScenario, self).__init__(
-            config.name, [ego_vehicle], config, world, debug_mode > 3, False, criteria_enable
+            config.name, [self.ego_vehicle], config, world, debug_mode > 3, False, criteria_enable
         )
 
     def _get_route(self, config):

@@ -25,7 +25,26 @@ try:
 except ImportError:
     raise RuntimeError('cannot import pygame, make sure pygame package is installed')
 
+from threading import Timer
+import pandas as pd
+import re
 import carla
+import openai
+openai.api_key = 'PLACE_API_KEY_HERE'
+
+import pinecone
+index_name = 'driving-index'
+
+# initialize connection to pinecone (get API key at app.pinecone.io)
+pinecone.init(
+    api_key="PLACE_API_KEY_HERE",
+    environment="northamerica-northeast1-gcp"  # find next to api key in console
+)
+# check if 'openai' index already exists (only create index if not)
+if index_name not in pinecone.list_indexes():
+    pinecone.create_index(index_name, dimension=len(embeds[0]))
+# connect to index
+index = pinecone.Index(index_name)
 
 from leaderboard.autoagents.autonomous_agent import AutonomousAgent, Track
 
@@ -39,7 +58,7 @@ class HumanInterface(object):
     Class to control a vehicle manually for debugging purposes
     """
 
-    def __init__(self, ctrl, width, height, side_scale, left_mirror=False, right_mirror=False):
+    def __init__(self, ego_vehicle, world, assistant, objects_path, audio_path, ctrl, width, height, side_scale, left_mirror=False, right_mirror=False):
         self._control = ctrl
         self._width = width
         self._height = height
@@ -60,6 +79,22 @@ class HumanInterface(object):
 
         self._fontsm = pygame.freetype.SysFont(None, 22)
         self._fontsm.origin=True
+
+        self._time = 0
+        self._speed = None
+        self._ego_vehicle = ego_vehicle
+        self._world = world
+        self._objects_path = objects_path
+        self._audio_path = audio_path
+        self._collecting_data = True
+
+        self._subtitle = None
+        self._df = pd.read_excel(self._audio_path+"audio_output.xlsx")
+
+        pygame.mixer.init()
+        
+        if (assistant):
+            self._start_collect_data()
 
     def run_interface(self, input_data):
         """
@@ -86,7 +121,10 @@ class HumanInterface(object):
         if self._surface is not None:
             self._display.blit(self._surface, (0, 0))
         
-        self._set_ctrl_interface(input_data['speed'][1]['speed'])
+        self._speed = np.floor(3.6 * np.abs(input_data['speed'][1]['speed']))
+        self._speed = str(int(self._speed))
+        self._set_ctrl_interface()
+
         pygame.display.flip()
 
     def set_black_screen(self):
@@ -97,21 +135,21 @@ class HumanInterface(object):
             self._display.blit(self._surface, (0, 0))
         pygame.display.flip()
 
-    def _set_ctrl_interface(self, speed):
+    def _set_ctrl_interface(self):
         for e in pygame.event.get():
             if e.type == pygame.QUIT: return
-        ticks=pygame.time.get_ticks()
+        time_limit = (7 * 60 * 1000)
+        ticks=time_limit - pygame.time.get_ticks() if time_limit > pygame.time.get_ticks() else pygame.time.get_ticks() - time_limit
         millis=ticks%1000
         seconds=int(ticks/1000 % 60)
         minutes=int(ticks/60000 % 24)
-        out='{minutes:02d}:{seconds:02d}:{millis}'.format(minutes=minutes, millis=millis, seconds=seconds)
+        out='{}{minutes:02d}:{seconds:02d}:{millis}'.format('' if time_limit > pygame.time.get_ticks() else '-', minutes=minutes, millis=millis, seconds=seconds)
 
-        self._font.render_to(self._display, (100, 100), out, pygame.Color('white'))
+        self._font.render_to(self._display, (100, 100), out, pygame.Color('white' if time_limit > pygame.time.get_ticks() else 'red'))
 
-        # Display speed information; convert m/s to km/h by multiply with 3.6
-        out_spd='%.0f km/h' % (3.6 * np.abs(speed))
+        # Display speed information
         self._fontsm.render_to(self._display, (100, 140), 'Speed: ', pygame.Color('white'))
-        self._fontsm.render_to(self._display, (240, 140), out_spd, pygame.Color('white'))
+        self._fontsm.render_to(self._display, (240, 140), self._speed, pygame.Color('white'))
 
         # Display gear information; 1 is normal and -1 is reverse
         out_gear='%s' % {-1: 'R', 0: 'N', 1: 'N'}.get(self._control.gear, self._control.gear)
@@ -134,6 +172,102 @@ class HumanInterface(object):
         else:
             pygame.draw.rect(self._display, pygame.Color('white'), (240 + rect_width // 2 - fill_width, 190, fill_width, rect_height))
 
+        # Display subtitle
+        self._font.render_to(self._display, (100, self._height-60), self._subtitle if self._subtitle is not None else '', pygame.Color('white'))
+
+
+    def _start_collect_data(self, prev_msg_time=0, prev_vehicle=False, prev_traffic=False, prev_walker=False):
+        self._time = self._time+1
+        msg_time = prev_msg_time
+        vehicle = False
+        traffic = False
+        walker = False
+        if (self._time > 20):
+            s = self._collect_nearby_objects_and_control()
+
+            if (type(s) == str):
+                vehicle = re.search('vehicle', s) is not None
+                traffic = re.search('traffic', s) is not None
+                walker = re.search('walker', s) is not None
+                is_new_objects = vehicle != prev_vehicle or traffic != prev_traffic or walker != prev_walker
+                if self._subtitle is not None and self._time - prev_msg_time > 5:
+                    self._subtitle = None
+
+                if (is_new_objects and self._time - prev_msg_time >= 20) or self._time - prev_msg_time >= 30:
+                    try:
+                        emb = self._get_embedding(s)
+                        msg = self._query_with_embedding(emb)
+
+                        path = msg['matches'][0]['id']
+                        msg_time = self._time
+
+                        print('Play audio at time {}: {}'.format(msg_time, path))
+                        sound_effect = pygame.mixer.Sound(self._audio_path+path)
+                        sound_effect.play()
+
+                        df_ref = self._df.loc[self._df['path'] == path]
+                        self._subtitle = df_ref['message'].values[0]
+
+                    except Exception as e:
+                        print("An error occurred while processing the objects:", str(e))
+
+        Timer(1, self._start_collect_data, args=(msg_time, vehicle, traffic, walker,)).start()
+
+    def _collect_nearby_objects_and_control(self):
+        threshold = 50
+        t = self._ego_vehicle.get_transform()
+        obj = self._world.get_actors()
+
+        if len(obj) > 1:
+            distance = lambda l: np.sqrt((l.x - t.location.x)**2 + (l.y - t.location.y)**2 + (l.z - t.location.z)**2)
+            # Show nearby actors within a distance threshold
+            
+            obj = [(int(np.floor(distance(x.get_location()))), x.type_id) 
+                        for x in obj if x.id != self._ego_vehicle.id and (distance(x.get_location()) <= threshold)]
+            
+        ctrl = self._control
+        spd = self._speed
+        spd_limit = self._ego_vehicle.get_speed_limit()
+        s = self._write_file(obj, ctrl, spd, spd_limit)
+
+        return s
+
+    def _write_file(self, objects, ctrl, spd, spd_limit):
+        if (len(objects) > 1):
+            objects = [(dist, x) for (dist, x) in objects if x.startswith('static') == False and x.startswith('sensor') == False]
+            ctrl = "['throttle':{}, 'steer':{}, 'brake':{}, 'speed':{}, 'speedLimit':{}]\n\n".format(
+                        0.7 if ctrl.throttle > 0 else 0,
+                        max(-1, min(1, ctrl.steer)),
+                        ctrl.hand_brake or ctrl.brake > 0,
+                        spd,
+                        spd_limit
+            )
+
+            # TODO: replace here with args from leaderboard evaluator
+            with open(self._objects_path, 'a') as f:
+                f.write(
+                    "count: {}\n"
+                    "objects: {}\n"
+                    "ctrl: {}".format(
+                        len(objects), 
+                        objects,
+                        ctrl
+                    )
+                )
+
+            return "{}{}".format(objects, ctrl.replace('\n',''))
+
+    def _get_embedding(self, text, model="text-embedding-ada-002"):
+        text = text.replace("\n", " ")
+        return openai.Embedding.create(input = [text], model=model)['data'][0]['embedding']
+    
+    def _query_with_embedding(self, emb, k=1):
+        results = index.query(
+            vector=emb,
+            top_k=k,
+            include_values=False
+        )
+        return results
 
     def _quit(self):
         pygame.quit()
@@ -148,7 +282,7 @@ class HumanAgent(AutonomousAgent):
     current_control = None
     agent_engaged = False
 
-    def setup(self, path_to_conf_file):
+    def setup(self, path_to_conf_file, ego_vehicle, world, assistant=False, objects_path="./objects_detected.txt", audio_path="./audio/"):
         """
         Setup the agent parameters
         """
@@ -162,7 +296,17 @@ class HumanAgent(AutonomousAgent):
         self._left_mirror = False
         self._right_mirror = False
 
+        self._ego_vehicle = ego_vehicle
+        self._world = world
+        self._objects_path = objects_path
+        self._audio_path = audio_path
+
         self._hic = HumanInterface(
+            self._ego_vehicle,
+            self._world,
+            assistant,
+            self._objects_path,
+            self._audio_path,
             self._control,
             self.camera_width,
             self.camera_height,
@@ -242,7 +386,6 @@ class KeyboardControl(object):
         Init
         """
         self._control = ctrl
-        self._control = carla.VehicleControl()
         self._steer_cache = 0.0
         self._clock = pygame.time.Clock()
 

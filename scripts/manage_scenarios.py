@@ -8,7 +8,7 @@ from leaderboard.utils.checkpoint_tools import fetch_dict
 from leaderboard.utils.route_parser import DIST_THRESHOLD
 
 SCENARIO_COLOR = {
-    "Scenario1": [carla.Color(255, 0, 0), "Red"],
+    "Scenario1": [carla.Color(0, 255, 0), "Red"],
     "Scenario2": [carla.Color(0, 255, 0), "Green"],
     "Scenario3": [carla.Color(0, 0, 255), "Blue"],
     "Scenario4": [carla.Color(255, 100, 0), "Orange"],

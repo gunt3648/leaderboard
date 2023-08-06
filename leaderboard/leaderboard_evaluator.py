@@ -258,7 +258,9 @@ class LeaderboardEvaluator(object):
 
             self.agent_instance = agent_class_obj(args.host, args.port, args.debug)
             self.agent_instance.set_global_plan(scenario.gps_route, scenario.route)
-            self.agent_instance.setup(args.agent_config)
+
+            print("Running CARLA {} assistant".format("with" if args.assistant else "without"))
+            self.agent_instance.setup(args.agent_config, scenario.ego_vehicle, self.world, assistant=args.assistant, objects_path=args.objects_detected, audio_path=args.audio_folder)
 
             # Check and store the sensors
             if not self.sensors:
@@ -427,6 +429,13 @@ def main():
                         help="Path to checkpoint used for saving statistics and resuming")
     parser.add_argument("--debug-checkpoint", type=str, default='./live_results.txt',
                         help="Path to checkpoint used for saving live results")
+    
+    parser.add_argument("--objects-detected", type=str, default='./objects_detected.txt',
+                        help="Path to objects detected used for text embedding and database query")
+    parser.add_argument("--audio-folder", type=str, default='./audio',
+                        help="Path to audio folder used to store tts files")
+    parser.add_argument("--assistant", type=bool, default=False,
+                        help="Run CARLA with assistant")
 
     arguments = parser.parse_args()
 
